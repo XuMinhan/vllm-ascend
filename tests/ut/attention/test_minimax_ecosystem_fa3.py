@@ -433,7 +433,9 @@ def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
 
     def scheduler(**kwargs):
         # The 950 API appends an int32 cumulative-KV entry per request.
-        return torch.full((3584 + 4 * (kwargs["batch_size"] + 1),), kwargs["batch_size"], dtype=torch.uint8)
+        tiling = torch.full((3584 + 4 * (kwargs["batch_size"] + 1),), kwargs["batch_size"], dtype=torch.uint8)
+        tiling._fa_scheduler_params = {"batch_marker": kwargs["batch_size"]}
+        return tiling
 
     addresses = []
     with patch.object(fa3, "get_scheduler_metadata", side_effect=scheduler):
@@ -445,6 +447,7 @@ def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
             addresses.append(tiling.data_ptr())
             assert tiling.numel() == 3584 + 4 * (batch_size + 1)
             assert torch.all(tiling == batch_size)
+            assert tiling._fa_scheduler_params == {"batch_marker": batch_size}
         common.num_input_tokens = 16
         other_bucket = builder.build(0, common)
     assert len(set(addresses)) == 1

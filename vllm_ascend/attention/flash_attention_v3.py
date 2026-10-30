@@ -216,6 +216,10 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
                 scheduler_metadata[spec] = buffer[: tiling.numel()].copy_(tiling)
             else:
                 scheduler_metadata[spec] = tiling
+            # Tensor copies/views do not preserve FA3's Python-side fingerprint.
+            # Refresh it together with the bytes while keeping graph addresses.
+            if hasattr(tiling, "_fa_scheduler_params"):
+                scheduler_metadata[spec]._fa_scheduler_params = tiling._fa_scheduler_params.copy()
         return AscendFlashAttentionMetadata(
             num_actual_tokens=common.num_actual_tokens,
             query_start_loc=query_start_loc,

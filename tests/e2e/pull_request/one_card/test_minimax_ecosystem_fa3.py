@@ -20,10 +20,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.parametrize("graph_stable", [False, True], ids=["eager", "graph_stable"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("window", [None, 16])
-def test_paged_attention_appends_kv_before_read(dtype, causal, window):
+def test_paged_attention_appends_kv_before_read(dtype, causal, window, graph_stable):
     torch.manual_seed(20167)
     page_size, heads, dim = 128, 4, 128
     q_lengths, kv_lengths = [7, 8], [130, 9]
@@ -54,7 +55,8 @@ def test_paged_attention_appends_kv_before_read(dtype, causal, window):
         expected.append(torch.einsum("hqk,kd->qhd", logits.softmax(-1), values))
         offset += qlen
     builder = object.__new__(AscendFlashAttentionMetadataBuilder)
-    builder.capture_sizes, builder.capture_query_len = set(), None
+    builder.capture_sizes = {15} if graph_stable else set()
+    builder.capture_query_len = 8 if graph_stable else None
     builder.max_num_reqs, builder.block_size = 2, page_size
     spec = (heads, 1, dim, dtype, 1 / math.sqrt(dim), 0.0, window)
     builder.scheduler_specs, builder.scheduler_buffers = {spec}, {}
@@ -71,6 +73,17 @@ def test_paged_attention_appends_kv_before_read(dtype, causal, window):
         slot_mapping=torch.tensor(slots, device="npu"),
         causal=causal,
     )
+    metadata = builder.build(0, common)
+    if graph_stable:
+        address = metadata.scheduler_metadata[spec].data_ptr()
+        # Reuse the captured token bucket while the active prefix shrinks/grows.
+        for active_tokens in (7, 15):
+            boundaries[-1] = active_tokens
+            common.query_start_loc.copy_(boundaries.npu())
+            common.num_actual_tokens = active_tokens
+            metadata = builder.build(0, common)
+            assert metadata.scheduler_metadata[spec].data_ptr() == address
+    # forward invokes the real FA3 fingerprint validation and NPU kernel.
     impl = AscendFlashAttentionImpl(heads, dim, 1 / math.sqrt(dim), num_kv_heads=1, sliding_window=window)
     actual_cache = cache.npu()
     output = torch.empty_like(q, device="npu")
@@ -80,7 +93,7 @@ def test_paged_attention_appends_kv_before_read(dtype, causal, window):
         new_k.npu(),
         new_v.npu(),
         actual_cache,
-        builder.build(0, common),
+        metadata,
         output,
     )
     torch.npu.synchronize()
