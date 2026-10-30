@@ -1,0 +1,8 @@
+pr: 1
+entries:
+  - category: bugfix
+    text: Aligned MiniMax M3 visual features with QuaRot-rotated text embeddings for checkpoints whose visual projection has not already been rotated.
+    model: MiniMax-M3.1-Flash
+  - category: bugfix
+    text: Restored FA3 scheduler API compatibility and preserved scheduler validation metadata when reusing graph buffers in the MiniMax integration.
+    model: MiniMax-M3.1-Flash
