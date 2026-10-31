@@ -349,7 +349,8 @@ def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):
 
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("padded", [False, True])
-def test_minimax_fa3_scheduler_api(fa3, causal, padded):
+@pytest.mark.parametrize("softcap", [0.0, 2.0])
+def test_minimax_fa3_scheduler_api(fa3, causal, padded, softcap):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
     builder.device = torch.device("cpu")
     builder.capture_sizes = set()
@@ -357,7 +358,7 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded):
     builder.block_size = 128
     builder.max_num_reqs = 3
     scale = 0.123
-    spec = (16, 1, 128, torch.bfloat16, scale, 0.0, 4096)
+    spec = (16, 1, 128, torch.bfloat16, scale, softcap, 4096)
     builder.scheduler_specs = {spec}
     builder.scheduler_buffers = {}
     offsets = torch.tensor([0, 8, 8] if padded else [0, 8, 11], dtype=torch.int32)
@@ -374,7 +375,8 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded):
         causal=causal,
     )
 
-    # Match the keyword-only subset of the v0.4.2.post2 public scheduler API.
+    # Match the noncontiguous branch's public scheduler API. Numerical scale
+    # and softcap are supplied separately by flash_attn_with_kvcache.
     def scheduler(
         *,
         batch_size,
@@ -389,12 +391,10 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded):
         page_size,
         causal,
         window_size,
-        softcap,
-        softmax_scale,
+        has_softcap,
         num_splits,
     ):
-        assert softcap == 0.0
-        assert softmax_scale == scale
+        assert has_softcap == (softcap > 0.0)
         assert window_size == (4095, 0 if causal else 4095)
         assert cache_seqlens.numel() == batch_size
         assert cu_seqlens_q.numel() == batch_size + 1
@@ -433,7 +433,9 @@ def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
 
     def scheduler(**kwargs):
         # The 950 API appends an int32 cumulative-KV entry per request.
-        return torch.full((3584 + 4 * (kwargs["batch_size"] + 1),), kwargs["batch_size"], dtype=torch.uint8)
+        tiling = torch.full((3584 + 4 * (kwargs["batch_size"] + 1),), kwargs["batch_size"], dtype=torch.uint8)
+        tiling._fa_scheduler_params = {"batch_marker": kwargs["batch_size"]}
+        return tiling
 
     addresses = []
     with patch.object(fa3, "get_scheduler_metadata", side_effect=scheduler):
@@ -445,6 +447,7 @@ def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
             addresses.append(tiling.data_ptr())
             assert tiling.numel() == 3584 + 4 * (batch_size + 1)
             assert torch.all(tiling == batch_size)
+            assert tiling._fa_scheduler_params == {"batch_marker": batch_size}
         common.num_input_tokens = 16
         other_bucket = builder.build(0, common)
     assert len(set(addresses)) == 1
